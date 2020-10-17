@@ -9,6 +9,7 @@ requirements:
 
 * libuv 1.x
 * lokimq 1.2
+* libsodium 1.0.18 
 * cmake
 
 build:
