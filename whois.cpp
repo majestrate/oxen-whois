@@ -1,10 +1,13 @@
 #include <uv.h>
 #include <lokimq/lokimq.h>
+#include <lokimq/base64.h>
+#include <lokimq/base32z.h>
 #include <lokimq/hex.h>
 #include <sodium/crypto_generichash.h>
+#include <sodium/crypto_aead_xchacha20poly1305.h>
 #include <nlohmann/json.hpp>
 #include <getopt.h>
-
+#include <future>
 
 struct LMQ
 {
@@ -18,6 +21,41 @@ struct LMQ
   lokimq::LokiMQ lmq;
   lokimq::ConnectionID conn;
 };
+
+std::optional<std::array<uint8_t, 32>>
+decrypt_value(std::string encrypted, std::string nouncehex, std::string name, int type)
+{
+  // TODO: implement
+  if(type == 0)
+    return std:: nullopt;
+  const auto ciphertext = lokimq::from_hex(encrypted);
+  const auto nounce = lokimq::from_hex(nouncehex);
+  
+  const auto payloadsize = ciphertext.size() - crypto_aead_xchacha20poly1305_ietf_ABYTES;
+  if (payloadsize != 32)
+    return {};
+  
+  std::array<uint8_t, 32> derivedKey{};
+  std::array<uint8_t, 32> namehash{};
+  crypto_generichash(namehash.data(), namehash.size(), reinterpret_cast<const unsigned char*>(name.data()), name.size(), nullptr, 0);
+  crypto_generichash(derivedKey.data(), derivedKey.size(), reinterpret_cast<const unsigned char*>(name.data()), name.size(), namehash.data(), namehash.size());
+  std::array<uint8_t, 32> result{};
+  if (crypto_aead_xchacha20poly1305_ietf_decrypt(
+        result.data(),
+        nullptr,
+        nullptr,
+        reinterpret_cast<const unsigned char*>(ciphertext.data()),
+        ciphertext.size(),
+        nullptr,
+        0,
+        reinterpret_cast<const unsigned char*>(nounce.data()),
+        derivedKey.data())
+      == -1)
+  {
+    return {};
+  }
+  return result;
+}
 
 
 struct Connection
@@ -87,12 +125,13 @@ struct Connection
     std::array<unsigned char, 32> namehash{};
     const std::string name(buf->base, nread - 2);
     crypto_generichash(namehash.data(), namehash.size(), reinterpret_cast<const unsigned char*>(name.data()), name.size(), nullptr, 0);
-    const nlohmann::json req{{"type", 2}, {"name_hash", lokimq::to_hex(namehash.begin(), namehash.end())}};
-     
+    
+    const nlohmann::json params{{"types", {2,0,}}, {"name_hash", lokimq::to_base64(namehash.begin(), namehash.end())}};
+    const nlohmann::json req{{"entries", {params,}}};
     m_LMQ->lmq.request(
       m_LMQ->conn,
-      "rpc.lns_resolve",
-      [&, name](bool success, std::vector<std::string> data)
+      "rpc.lns_names_to_owners",
+      [&, name, namehash](bool success, std::vector<std::string> data)
       {
         if((not success) or data.size() < 2)
         {
@@ -102,10 +141,60 @@ struct Connection
         }
         try
         {
+          size_t n = 0;
           const auto j = nlohmann::json::parse(data[1]);
-          for(const auto & [key, value] : j.items())
+          
+          if(j.find("entries") == j.end())
           {
-            m_WriteBuf << key << ": " << value << std::endl;
+            m_WriteBuf << "; no results for " << name;
+          }
+          else
+          {
+            constexpr auto permit_key = [](std::string k) { return k != "encrypted_value" and k != "entry_index"; };
+            for(const auto & item : j["entries"])
+            {
+              std::string encrypted;
+              int type = 0;
+              m_WriteBuf << "; entry " << n++ << std::endl;
+              for(const auto & [key, value] : item.items())
+              {
+                if(key == "type")
+                {
+                  type = value.get<int>();
+                }
+                if(permit_key(key))
+                {
+                  m_WriteBuf << key << ": ";
+                  if(value.is_string())
+                    m_WriteBuf << value.get<std::string>();
+                  else
+                    m_WriteBuf << value;
+                  m_WriteBuf << std::endl;
+                }
+                else if(key == "encrypted_value")
+                {
+                  encrypted = value.get<std::string>();
+                }
+              }
+              const auto maybe = getAddress(lokimq::to_hex(namehash.begin(), namehash.end()), name, type);
+              if(maybe.has_value())
+              {
+                m_WriteBuf << "current-address: ";
+                switch(type)
+                {
+                case 0:
+                  m_WriteBuf << "05" << lokimq::to_hex(maybe->begin(), maybe->end()) << std::endl;
+                  break;
+                case 2:
+                  m_WriteBuf << lokimq::to_base32z(maybe->begin(), maybe->end()) << ".loki" << std::endl;
+                  break;
+                default:
+                  m_WriteBuf << lokimq::to_base64(maybe->begin(), maybe->end()) << std::endl;
+                  break;
+                } 
+              }
+              m_WriteBuf << std::endl;
+            }
           }
         }
         catch(std::exception & ex)
@@ -114,7 +203,51 @@ struct Connection
           m_WriteBuf << ex.what();
         }
         uv_async_send(&m_Wakeup);
-      });
+      }, req.dump());
+  }
+
+  std::optional<std::array<uint8_t, 32>>
+  getAddress(std::string namehash, std::string name, int type)
+  {
+    const nlohmann::json req{{"type", type}, {"name_hash", namehash}};
+
+    std::promise<std::optional<std::array<uint8_t, 32>>> result;
+    m_LMQ->lmq.request(
+      m_LMQ->conn,
+      "rpc.lns_resolve",
+      [&result, name, type](bool success, std::vector<std::string> data)
+      {
+        if(not success)
+          result.set_value(std::nullopt);
+        else
+        {
+          try
+          {
+            const auto j = nlohmann::json::parse(data[1]);
+            const auto itr = j.find("nonce");
+            if(itr == j.end())
+            {
+              result.set_value(std::nullopt);
+            }
+            else
+            {
+              const auto value_itr = j.find("encrypted_value");
+              if(value_itr == j.end())
+              {
+                result.set_value(std::nullopt);
+              }
+              else
+                result.set_value(decrypt_value(value_itr->get<std::string>(), itr->get<std::string>(), name, type));
+            }
+          }
+          catch(...)
+          {
+            result.set_value(std::nullopt);
+          }
+        }
+      }, req.dump());
+    auto ftr = result.get_future();
+    return ftr.get();
   }
 
   static void
