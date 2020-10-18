@@ -171,7 +171,7 @@ struct Connection
             {
               std::string encrypted;
               LNSType type = eTypeUnknown;
-              m_WriteBuf << "; entry " << n++ << std::endl;
+              m_WriteBuf << "; entry " << n++ << " for " << name << std::endl;
               for(const auto & [key, value] : item.items())
               {
                 if(key == "type")
