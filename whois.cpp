@@ -412,6 +412,8 @@ int main(int argc, char * argv[])
   server.data = &lmq;
   uv_tcp_init(loop, &server);
   req.data = &server;
+  signal(SIGINT, [](auto) { exit(0); });
+  signal(SIGTERM, [](auto) { exit(0); });
   std::cout << "loki-whois " << bindhost << ":" << bindport << std::endl;
   const addrinfo hints = {0, AF_INET, SOCK_STREAM, 0,0,0,0};
   uv_getaddrinfo(loop, &req, &OnBindResolved, bindhost.c_str(), bindport.c_str(), &hints);
