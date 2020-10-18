@@ -9,6 +9,16 @@
 #include <getopt.h>
 #include <future>
 
+
+// lns type enum for determining what kind of lsn entry we are looking at
+enum LNSType
+{
+  eTypeUnknown = -1,
+  eTypeSession = 0,
+  eTypeLokinet = 2
+};
+
+
 struct LMQ
 {
   explicit LMQ(std::string remote)
@@ -23,10 +33,10 @@ struct LMQ
 };
 
 std::optional<std::array<uint8_t, 32>>
-decrypt_value(std::string encrypted, std::string nouncehex, std::string name, int type)
+decrypt_value(std::string encrypted, std::string nouncehex, std::string name, LNSType type)
 {
   // TODO: implement
-  if(type == 0)
+  if(type == eTypeSession)
     return std:: nullopt;
   const auto ciphertext = lokimq::from_hex(encrypted);
   const auto nounce = lokimq::from_hex(nouncehex);
@@ -107,6 +117,12 @@ struct Connection
     auto self = static_cast<Connection*>(handle->data);
     self->HandleRead(nread, buf);
   };
+
+  void
+  SendReply()
+  {
+    uv_async_send(&m_Wakeup);
+  }
   
   void
   HandleRead(ssize_t nread, const uv_buf_t * buf)
@@ -136,7 +152,7 @@ struct Connection
         if((not success) or data.size() < 2)
         {
           m_WriteBuf << "; cannot find info on " << name;
-          uv_async_send(&m_Wakeup);
+          SendReply();
           return;
         }
         try
@@ -154,13 +170,23 @@ struct Connection
             for(const auto & item : j["entries"])
             {
               std::string encrypted;
-              int type = 0;
+              LNSType type = eTypeUnknown;
               m_WriteBuf << "; entry " << n++ << std::endl;
               for(const auto & [key, value] : item.items())
               {
                 if(key == "type")
                 {
-                  type = value.get<int>();
+                  switch(value.get<int>())
+                  {
+                  case eTypeSession:
+                    type = eTypeSession;
+                    break;
+                  case eTypeLokinet:
+                    type = eTypeLokinet;
+                    break;
+                  default:
+                    break;
+                  }
                 }
                 if(permit_key(key))
                 {
@@ -182,16 +208,20 @@ struct Connection
                 m_WriteBuf << "current-address: ";
                 switch(type)
                 {
-                case 0:
+                case eTypeSession:
                   m_WriteBuf << "05" << lokimq::to_hex(maybe->begin(), maybe->end()) << std::endl;
                   break;
-                case 2:
+                case eTypeLokinet:
                   m_WriteBuf << lokimq::to_base32z(maybe->begin(), maybe->end()) << ".loki" << std::endl;
                   break;
                 default:
                   m_WriteBuf << lokimq::to_base64(maybe->begin(), maybe->end()) << std::endl;
                   break;
                 } 
+              }
+              else if(type == eTypeSession and not encrypted.empty())
+              {
+                m_WriteBuf << "encrypted-value: " << encrypted;
               }
               m_WriteBuf << std::endl;
             }
@@ -202,13 +232,15 @@ struct Connection
           m_WriteBuf << "; exception thrown while parsing response: ";
           m_WriteBuf << ex.what();
         }
-        uv_async_send(&m_Wakeup);
+        SendReply();
       }, req.dump());
   }
 
   std::optional<std::array<uint8_t, 32>>
-  getAddress(std::string namehash, std::string name, int type)
+  getAddress(std::string namehash, std::string name, LNSType type)
   {
+    if(type == eTypeUnknown)
+      return std::nullopt;
     const nlohmann::json req{{"type", type}, {"name_hash", namehash}};
 
     std::promise<std::optional<std::array<uint8_t, 32>>> result;
@@ -343,6 +375,7 @@ int printhelp(std::string exe)
   std::cout << "usage: " << exe << " -[h|v] [-r rpcurl | -p bindport | -H bindhost]" << std::endl;
   return 0;
 }
+
 
 int main(int argc, char * argv[])
 {
