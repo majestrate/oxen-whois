@@ -21,8 +21,11 @@ enum LNSType
 
 struct LMQ
 {
-  explicit LMQ(std::string remote)
+  explicit LMQ(std::string remote, bool verbose) :
+    lmq{[](lokimq::LogLevel level, const char* file, int line, std::string msg) { std::cout << level << " " << file << ":" << line << msg << std::endl; }}
   {
+    if(verbose)
+      lmq.log_level(lokimq::LogLevel::debug);
     lmq.start();
     conn = lmq.connect_remote(remote, nullptr, nullptr);
   }
@@ -387,7 +390,7 @@ int printhelp(std::string exe)
 int main(int argc, char * argv[])
 {
 
-  std::string rpc = "tcp://127.0.0.1:22023";
+  std::string rpc = "ipc:///var/lib/loki/lokid.sock";
   bool verbose = false;
   std::string bindport = "whois";
   std::string bindhost = "localhost.loki";
@@ -412,7 +415,7 @@ int main(int argc, char * argv[])
       break;
     }
   }
-  LMQ lmq(rpc);
+  LMQ lmq(rpc, verbose);
   auto loop = uv_default_loop();
   uv_getaddrinfo_t req;
   uv_tcp_t server;
