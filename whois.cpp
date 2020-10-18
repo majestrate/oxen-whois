@@ -176,19 +176,26 @@ struct Connection
               {
                 if(key == "type")
                 {
+                  if(not value.is_number())
+                  {
+                    continue;
+                  }
                   switch(value.get<int>())
                   {
                   case eTypeSession:
                     type = eTypeSession;
+                    m_WriteBuf << "type: session" << std::endl;
                     break;
                   case eTypeLokinet:
                     type = eTypeLokinet;
+                    m_WriteBuf << "type: lokinet" << std::endl;
                     break;
                   default:
+                    m_WriteBuf << "type: " << value << std::endl;
                     break;
                   }
                 }
-                if(permit_key(key))
+                else if(permit_key(key))
                 {
                   m_WriteBuf << key << ": ";
                   if(value.is_string())
