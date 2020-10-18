@@ -9,7 +9,8 @@ requirements:
 
 * libuv 1.x
 * lokimq 1.2
-* libsodium 1.0.18 
+* libsodium 1.0.18
+* nlohmann-json 3.x
 * cmake
 
 build:
