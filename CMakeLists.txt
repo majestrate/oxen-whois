@@ -23,9 +23,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(PkgConfig)
-pkg_check_modules(PC_LOKIMQ liblokimq REQUIRED)
-pkg_check_modules(PC_UV libuv REQUIRED)
+pkg_check_modules(PC_OXENMQ liboxenmq REQUIRED)
 pkg_check_modules(PC_SODIUM libsodium REQUIRED)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON) 
+
+set(BUILD_TESTING OFF)
+set(BUILD_UVW_LIBS ON)
+add_subdirectory(external/uvw)
+
 add_executable(${PROJECT_NAME} whois.cpp)
-target_link_libraries(${PROJECT_NAME} PUBLIC ${PC_LOKIMQ_LIBRARIES} ${PC_UV_LIBRARIES} ${PC_SODIUM_LIBRARIES})
+target_link_libraries(${PROJECT_NAME} PUBLIC ${PC_OXENMQ_LIBRARIES} uvw::uvw-static ${PC_SODIUM_LIBRARIES})

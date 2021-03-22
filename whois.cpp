@@ -1,8 +1,8 @@
-#include <uv.h>
-#include <lokimq/lokimq.h>
-#include <lokimq/base64.h>
-#include <lokimq/base32z.h>
-#include <lokimq/hex.h>
+#include <uvw.hpp>
+#include <oxenmq/oxenmq.h>
+#include <oxenmq/base64.h>
+#include <oxenmq/base32z.h>
+#include <oxenmq/hex.h>
 #include <sodium/crypto_generichash.h>
 #include <sodium/crypto_aead_xchacha20poly1305.h>
 #include <nlohmann/json.hpp>
@@ -22,18 +22,17 @@ enum LNSType
 struct LMQ
 {
   explicit LMQ(std::string remote, bool verbose) :
-    lmq{[](lokimq::LogLevel level, const char* file, int line, std::string msg) { std::cout << level << " " << file << ":" << line << msg << std::endl; }}
+    lmq{[](oxenmq::LogLevel level, const char* file, int line, std::string msg) { std::cout << level << " " << file << ":" << line << msg << std::endl; }}
   {
     if(verbose)
-      lmq.log_level(lokimq::LogLevel::debug);
+      lmq.log_level(oxenmq::LogLevel::debug);
     lmq.start();
     conn = lmq.connect_remote(remote, nullptr, nullptr);
   }
-
-  
-  lokimq::LokiMQ lmq;
-  lokimq::ConnectionID conn;
+  oxenmq::OxenMQ lmq;
+  oxenmq::ConnectionID conn;
 };
+
 
 std::optional<std::array<uint8_t, 32>>
 decrypt_value(std::string encrypted, std::string nouncehex, std::string name, LNSType type)
@@ -41,13 +40,13 @@ decrypt_value(std::string encrypted, std::string nouncehex, std::string name, LN
   // TODO: implement
   if(type == eTypeSession)
     return std:: nullopt;
-  const auto ciphertext = lokimq::from_hex(encrypted);
-  const auto nounce = lokimq::from_hex(nouncehex);
-  
+  const auto ciphertext = oxenmq::from_hex(encrypted);
+  const auto nounce = oxenmq::from_hex(nouncehex);
+
   const auto payloadsize = ciphertext.size() - crypto_aead_xchacha20poly1305_ietf_ABYTES;
   if (payloadsize != 32)
     return {};
-  
+
   std::array<uint8_t, 32> derivedKey{};
   std::array<uint8_t, 32> namehash{};
   crypto_generichash(namehash.data(), namehash.size(), reinterpret_cast<const unsigned char*>(name.data()), name.size(), nullptr, 0);
@@ -70,91 +69,120 @@ decrypt_value(std::string encrypted, std::string nouncehex, std::string name, LN
   return result;
 }
 
-
-struct Connection
+class WhoisServer : public std::enable_shared_from_this<WhoisServer>
 {
+  std::shared_ptr<uvw::Loop> m_Loop;
+  std::shared_ptr<uvw::TCPHandle> m_Server;
+  std::shared_ptr<LMQ> m_LMQ;
+  const std::pair<std::string, std::string> m_Bind;
 
-  Connection(uv_stream_t * stream) :
-    m_LMQ(static_cast<LMQ*>(stream->data))
-  {
-    m_Handle.data = this;
-    m_Wakeup.data = this;
-    uv_tcp_init(stream->loop, &m_Handle);
-    uv_async_init(stream->loop, &m_Wakeup, &Wakeup);
-  }
 
-  uv_stream_t * Handle()
-  {
-    return (uv_stream_t*)&m_Handle;
-  }
 
+  template<typename ResultHandler>
   void
-  Close()
+  AsyncGetAddress(std::string namehash, std::string name, LNSType type, ResultHandler handler)
   {
-    uv_close((uv_handle_t*)&m_Wakeup,
-             [](uv_handle_t * h)
-             {
-               auto self = static_cast<Connection*>(h->data);
-               uv_close((uv_handle_t*)self->Handle(),
-                        [](uv_handle_t * h) { delete static_cast<Connection*>(h->data); });
-             });
-  }
-
-  static void
-  Wakeup(uv_async_t * handle)
-  {
-    auto self = static_cast<Connection*>(handle->data);
-    self->WriteReply();
-  }
-
-  static void
-  Alloc(uv_handle_t * handle, size_t, uv_buf_t * buf)
-  {
-    auto self = static_cast<Connection*>(handle->data);
-    *buf = uv_buf_init(self->m_ReadBuf.data(), self->m_ReadBuf.size());
-  }
-  
-  static void
-  OnRead(uv_stream_t * handle, ssize_t nread, const uv_buf_t * buf)
-  {
-    auto self = static_cast<Connection*>(handle->data);
-    self->HandleRead(nread, buf);
-  };
-
-  void
-  SendReply()
-  {
-    uv_async_send(&m_Wakeup);
-  }
-  
-  void
-  HandleRead(ssize_t nread, const uv_buf_t * buf)
-  {
-    // drop any additional stuff
-    if(m_GotRequest)
-      return;
-    // short read
-    if(nread <= 2)
+    if(type == eTypeUnknown)
     {
-      Close();
+      handler(std::nullopt);
       return;
     }
-    m_GotRequest = true;
-
-    std::array<unsigned char, 32> namehash{};
-    const std::string name(buf->base, nread - 2);
-    crypto_generichash(namehash.data(), namehash.size(), reinterpret_cast<const unsigned char*>(name.data()), name.size(), nullptr, 0);
-    
-    const nlohmann::json params{{"types", {2,0,}}, {"name_hash", lokimq::to_base64(namehash.begin(), namehash.end())}};
-    const nlohmann::json req{{"entries", {params,}}};
+    const nlohmann::json req{{"type", type}, {"name_hash", namehash}};
     m_LMQ->lmq.request(
       m_LMQ->conn,
-      "rpc.lns_names_to_owners",
-      [&, name, namehash](bool success, std::vector<std::string> data)
+      "rpc.lns_resolve",
+      [handler, name, type](bool success, std::vector<std::string> data)
       {
-        if((not success) or data.size() < 2)
+        if(not success)
         {
-          m_WriteBuf << "; cannot find info on " << name;
+          handler(std::nullopt);
+        }
+        else
+        {
+          try
+          {
+            const auto j = nlohmann::json::parse(data[1]);
+            const auto itr = j.find("nonce");
+            if(itr == j.end())
+            {
+              handler(std::nullopt);
+            }
+            else
+            {
+              const auto value_itr = j.find("encrypted_value");
+              if(value_itr == j.end())
+              {
+                handler(std::nullopt);
+              }
+              else
+                handler(decrypt_value(value_itr->get<std::string>(), itr->get<std::string>(), name, type));
+            }
+          }
+          catch(...)
+          {
+            handler(std::nullopt);
+          }
+        }
+      }, req.dump());
+  }
+
+
+  std::optional<std::array<uint8_t, 32>>
+  GetAddress(std::string namehash, std::string name, LNSType type)
+  {
+    std::promise<std::optional<std::array<uint8_t, 32>>> promise;
+    AsyncGetAddress(namehash, name, type, [&promise](auto result) { promise.set_value(result); });
+    auto ftr = promise.get_future();
+    return ftr.get();
+  }
+
+  void
+  setupConnection(std::shared_ptr<uvw::TCPHandle> conn)
+  {
+    conn->on<uvw::DataEvent>(
+      [self=shared_from_this()](const uvw::DataEvent & event, uvw::TCPHandle & conn)
+      {
+        self->HandleConnRead(conn, event.data.get(), event.length);
+      });
+    conn->data(shared_from_this());
+  }
+
+  void
+  HandleConnRead(uvw::TCPHandle & conn, const char * ptr, size_t len)
+  {
+    if(len <= 2)
+    {
+      // short read
+      conn.close();
+      return;
+    }
+    std::array<unsigned char, 32> namehash{};
+    const std::string name{ptr, len - 2};
+    std::cout << "lookup name : " << name << std::endl;
+    crypto_generichash(namehash.data(), namehash.size(), reinterpret_cast<const unsigned char*>(name.data()), name.size(), nullptr, 0);
+
+    const nlohmann::json params{{"types", {2,0,}}, {"name_hash", oxenmq::to_base64(namehash.begin(), namehash.end())}};
+    const nlohmann::json req{{"entries", {params,}}};
+    m_LMQ->lmq.request(
+        m_LMQ->conn, "rpc.lns_names_to_owners",
+        [conn = conn.shared_from_this(), self=shared_from_this(), name, namehash](
+          bool success, std::vector<std::string> data)
+        {
+
+          std::stringstream writeBuf;
+          auto SendReply =
+            [&writeBuf, conn]()
+            {
+              auto str = writeBuf.str();
+              std::vector<char> buf;
+              buf.resize(str.size());
+              std::copy_n(str.c_str(), buf.size(), buf.data());
+              conn->write(buf.data(), buf.size());
+              conn->close();
+            };
+          if((not success) or data.size() < 2)
+          {
+          writeBuf << "; cannot find info on " << name;
           SendReply();
           return;
         }
@@ -162,10 +190,10 @@ struct Connection
         {
           size_t n = 0;
           const auto j = nlohmann::json::parse(data[1]);
-          
+
           if(j.find("entries") == j.end())
           {
-            m_WriteBuf << "; no results for " << name;
+            writeBuf << "; no results for " << name;
           }
           else
           {
@@ -174,7 +202,7 @@ struct Connection
             {
               std::string encrypted;
               LNSType type = eTypeUnknown;
-              m_WriteBuf << "; entry " << n++ << " for " << name << std::endl;
+              writeBuf << "; entry " << n++ << " for " << name << std::endl;
               for(const auto & [key, value] : item.items())
               {
                 if(key == "type")
@@ -187,169 +215,91 @@ struct Connection
                   {
                   case eTypeSession:
                     type = eTypeSession;
-                    m_WriteBuf << "type: session" << std::endl;
+                    writeBuf << "type: session" << std::endl;
                     break;
                   case eTypeLokinet:
                     type = eTypeLokinet;
-                    m_WriteBuf << "type: lokinet" << std::endl;
+                    writeBuf << "type: lokinet" << std::endl;
                     break;
                   default:
-                    m_WriteBuf << "type: " << value << std::endl;
+                    writeBuf << "type: " << value << std::endl;
                     break;
                   }
                 }
                 else if(permit_key(key))
                 {
-                  m_WriteBuf << key << ": ";
+                  writeBuf << key << ": ";
                   if(value.is_string())
-                    m_WriteBuf << value.get<std::string>();
+                    writeBuf << value.get<std::string>();
                   else
-                    m_WriteBuf << value;
-                  m_WriteBuf << std::endl;
+                    writeBuf << value;
+                  writeBuf << std::endl;
                 }
                 else if(key == "encrypted_value")
                 {
                   encrypted = value.get<std::string>();
                 }
               }
-              const auto maybe = getAddress(lokimq::to_hex(namehash.begin(), namehash.end()), name, type);
+              auto maybe = self->GetAddress(oxenmq::to_hex(namehash.begin(), namehash.end()), name, type);
               if(maybe.has_value())
               {
-                m_WriteBuf << "current-address: ";
+                writeBuf << "current-address: ";
                 switch(type)
                 {
                 case eTypeSession:
-                  m_WriteBuf << "05" << lokimq::to_hex(maybe->begin(), maybe->end()) << std::endl;
+                  writeBuf << "05" << oxenmq::to_hex(maybe->begin(), maybe->end()) << std::endl;
                   break;
                 case eTypeLokinet:
-                  m_WriteBuf << lokimq::to_base32z(maybe->begin(), maybe->end()) << ".loki" << std::endl;
+                  writeBuf << oxenmq::to_base32z(maybe->begin(), maybe->end()) << ".loki" << std::endl;
                   break;
                 default:
-                  m_WriteBuf << lokimq::to_base64(maybe->begin(), maybe->end()) << std::endl;
+                  writeBuf << oxenmq::to_base64(maybe->begin(), maybe->end()) << std::endl;
                   break;
-                } 
+                }
               }
               else if(type == eTypeSession and not encrypted.empty())
               {
-                m_WriteBuf << "encrypted-value: " << encrypted;
+                writeBuf << "encrypted-value: " << encrypted;
               }
-              m_WriteBuf << std::endl;
+              writeBuf << std::endl;
             }
           }
         }
         catch(std::exception & ex)
         {
-          m_WriteBuf << "; exception thrown while parsing response: ";
-          m_WriteBuf << ex.what();
+          writeBuf << "; exception thrown while parsing response: ";
+          writeBuf << ex.what();
         }
         SendReply();
       }, req.dump());
   }
 
-  std::optional<std::array<uint8_t, 32>>
-  getAddress(std::string namehash, std::string name, LNSType type)
+public:
+  WhoisServer(std::string rpc, std::pair<std::string, std::string> bindAddr, bool verbose)
+    : m_Loop{uvw::Loop::getDefault()},
+      m_LMQ{std::make_shared<LMQ>(rpc, verbose)},
+      m_Bind{bindAddr}
   {
-    if(type == eTypeUnknown)
-      return std::nullopt;
-    const nlohmann::json req{{"type", type}, {"name_hash", namehash}};
-
-    std::promise<std::optional<std::array<uint8_t, 32>>> result;
-    m_LMQ->lmq.request(
-      m_LMQ->conn,
-      "rpc.lns_resolve",
-      [&result, name, type](bool success, std::vector<std::string> data)
-      {
-        if(not success)
-          result.set_value(std::nullopt);
-        else
-        {
-          try
-          {
-            const auto j = nlohmann::json::parse(data[1]);
-            const auto itr = j.find("nonce");
-            if(itr == j.end())
-            {
-              result.set_value(std::nullopt);
-            }
-            else
-            {
-              const auto value_itr = j.find("encrypted_value");
-              if(value_itr == j.end())
-              {
-                result.set_value(std::nullopt);
-              }
-              else
-                result.set_value(decrypt_value(value_itr->get<std::string>(), itr->get<std::string>(), name, type));
-            }
-          }
-          catch(...)
-          {
-            result.set_value(std::nullopt);
-          }
-        }
-      }, req.dump());
-    auto ftr = result.get_future();
-    return ftr.get();
   }
 
-  static void
-  OnWrite(uv_write_t * req, int)
-  {
-    static_cast<Connection *>(req->data)->Close();
-  }
-  
+
   void
-  WriteReply()
+  MainLoop()
   {
-    m_Reply = m_WriteBuf.str();
-    m_Response.data = this;
-    uv_buf_t buf = uv_buf_init(m_Reply.data(), m_Reply.size());
-    uv_write(&m_Response, Handle(), &buf, 1, &OnWrite);
-  }
-  
-  uv_tcp_t m_Handle;
-  uv_async_t m_Wakeup;
-  LMQ * const m_LMQ;
-  uv_write_t m_Response;
-  std::array<char, 256> m_ReadBuf;
-  std::stringstream m_WriteBuf;
-  std::string m_Reply;
-  bool m_GotRequest = false;
-};
+    addrinfo hints = {0, AF_INET, SOCK_STREAM, 0,0,0,0};
+    auto lookup = m_Loop->resource<uvw::GetAddrInfoReq>();
+    std::cout << "looking up " << m_Bind.first << "... " << std::endl;
+    auto [success, result] = lookup->addrInfoSync(m_Bind.first, m_Bind.second, &hints);
+    if(not success)
+    {
+      std::cerr << "cannot lookup " << m_Bind.first << std::endl;
+      return;
+    }
 
-static void
-Accept(uv_stream_t * stream, int status)
-{
-  if(status)
-  {
-    std::cerr << "accept(): " << uv_strerror(status) << std::endl;
-    return;
-  }
-  auto conn = new Connection(stream);
-  status = uv_accept(stream, conn->Handle());
-  if(status)
-  {
-    conn->Close();
-    std::cerr << "accept(): " << uv_strerror(status) << std::endl;
-    return;
-  }
-  uv_read_start(conn->Handle(), &Connection::Alloc, &Connection::OnRead);
-}
+    addrinfo * next = result.get();
 
-static void
-OnBindResolved(uv_getaddrinfo_t * req, int status, addrinfo * info)
-{
-  if(status)
-  {
-    std::cerr << "getaddrinfo() " << uv_strerror(status) << std::endl;
-    exit(1);
-  }
-  else
-  {
-    uv_tcp_t * tcp = static_cast<uv_tcp_t*>(req->data);
-    addrinfo * next = info;
-    
     const sockaddr * addr = nullptr;
+
     do
     {
       if(next->ai_family == AF_INET)
@@ -358,31 +308,37 @@ OnBindResolved(uv_getaddrinfo_t * req, int status, addrinfo * info)
     } while(next);
     if(addr == nullptr)
     {
-      std::cerr << "no such address" << std::endl;
-      exit(1);
+      std::cerr << "no such address " << m_Bind.first << std::endl;
+      return;
     }
-    status = uv_tcp_bind(tcp, addr, 0);
-    if(status)
-    {
-      std::cerr << "uv_tcp_bind() " << uv_strerror(status) << std::endl;
-      exit(1);
-    }
-    else
-    {
-      status = uv_listen((uv_stream_t*)tcp, 5, &Accept);
-      if(status)
+
+    m_Server = m_Loop->resource<uvw::TCPHandle>();
+    m_Server->on<uvw::ListenEvent>(
+      [self=shared_from_this()](auto, uvw::TCPHandle & serv)
       {
-        std::cerr << "uv_listen() " << uv_strerror(status) << std::endl;
-        exit(1);
-      }
-    }
+        auto client = serv.loop().resource<uvw::TCPHandle>();
+        self->setupConnection(client);
+        serv.accept(*client);
+        client->read();
+      });
+    m_Server->on<uvw::ErrorEvent>(
+      [self=shared_from_this()](const uvw::ErrorEvent & ev, uvw::TCPHandle & serv)
+      {
+        std::cerr << "failed: " << ev.what() << std::endl;
+        serv.close();
+        ::exit(1);
+      });
+    std::cout << "bind to " << m_Bind.first << " on " << m_Bind.second << std::endl;
+    m_Server->bind(*addr);
+    m_Server->listen();
+    m_Loop->run();
   }
-  uv_freeaddrinfo(info);
-}
+};
+
 
 int printhelp(std::string exe)
 {
-  std::cout << "usage: " << exe << " -[h|v] [-r rpcurl | -p bindport | -H bindhost]" << std::endl;
+  std::cout << "usage: " << exe << " -[h|v] [-r rpcurl | -P bindport | -H bindhost]" << std::endl;
   return 0;
 }
 
@@ -393,9 +349,9 @@ int main(int argc, char * argv[])
   std::string rpc = "ipc:///var/lib/loki/lokid.sock";
   bool verbose = false;
   std::string bindport = "whois";
-  std::string bindhost = "localhost.loki";
+  std::string bindhost = "0.0.0.0";
   int opt;
-  while((opt = ::getopt(argc, argv, "hvr:p:H:")) != -1)
+  while((opt = ::getopt(argc, argv, "hvr:P:H:")) != -1)
   {
     switch(opt)
     {
@@ -415,17 +371,10 @@ int main(int argc, char * argv[])
       break;
     }
   }
-  LMQ lmq(rpc, verbose);
-  auto loop = uv_default_loop();
-  uv_getaddrinfo_t req;
-  uv_tcp_t server;
-  server.data = &lmq;
-  uv_tcp_init(loop, &server);
-  req.data = &server;
+
+  auto serv = std::make_shared<WhoisServer>(rpc, std::pair<std::string, std::string>{bindhost, bindport}, verbose);
   signal(SIGINT, [](auto) { exit(0); });
   signal(SIGTERM, [](auto) { exit(0); });
-  std::cout << "loki-whois " << bindhost << ":" << bindport << std::endl;
-  const addrinfo hints = {0, AF_INET, SOCK_STREAM, 0,0,0,0};
-  uv_getaddrinfo(loop, &req, &OnBindResolved, bindhost.c_str(), bindport.c_str(), &hints);
-  return uv_run(loop, UV_RUN_DEFAULT);
+  serv->MainLoop();
+  return 0;
 }

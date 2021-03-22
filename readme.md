@@ -7,24 +7,24 @@ A whois server for lns
 
 requirements:
 
-* libuv 1.x
-* lokimq 1.2
+* oxenmq
 * libsodium 1.0.18
 * nlohmann-json 3.x
 * cmake
 
 build:
 
+    $ git submodule update --init --recursive
     $ mkdir build 
     $ cd build
     $ cmake ..
     $ make
-    $ sudo make install
     
 ## running
 
 set to run with systemd:
 
+    $ sudo make install
     $ sudo cp contrib/loki-whois.service /etc/systemd/system/
     $ sudo systemctl enable --now loki-whois
     
