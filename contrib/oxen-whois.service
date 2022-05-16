@@ -1,13 +1,13 @@
 [Unit]
-Description=Loki-Whois: a whois server for loki blockchain
+Description=Oxen-Whois: a whois server for oxen blockchain
 Wants=lokinet.service
 After=lokinet.service
 
 [Service]
 User=_lokinet
 Group=_loki
-SyslogIdentifier=loki-whois
-ExecStart=/usr/local/bin/loki-whois
+SyslogIdentifier=oxen-whois
+ExecStart=/usr/local/bin/oxen-whois
 Restart=always
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 

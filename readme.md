@@ -1,6 +1,6 @@
-# loki-whois
+# oxen-whois
 
-A whois server for lns
+A whois server for ons
 
 
 ## building
@@ -25,8 +25,8 @@ build:
 set to run with systemd:
 
     $ sudo make install
-    $ sudo cp contrib/loki-whois.service /etc/systemd/system/
-    $ sudo systemctl enable --now loki-whois
+    $ sudo cp contrib/oxen-whois.service /etc/systemd/system/
+    $ sudo systemctl enable --now oxen-whois
     
     
 ## usage

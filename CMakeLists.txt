@@ -10,10 +10,10 @@ if(CCACHE_PROGRAM)
   endforeach()
 endif()
 
-set(PROJECT_NAME loki-whois)
+set(PROJECT_NAME oxen-whois)
 project(${PROJECT_NAME}
     VERSION 0.0.1
-    DESCRIPTION "loki-whois - whois server for loki blockchain"
+    DESCRIPTION "oxen-whois - whois server for oxen blockchain"
     LANGUAGES CXX)
 
 include(CheckCXXSourceCompiles)
@@ -28,9 +28,24 @@ pkg_check_modules(PC_SODIUM libsodium REQUIRED)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON) 
 
+option(WITH_STATIC "static link all the stuff" OFF)
+
 set(BUILD_TESTING OFF)
-set(BUILD_UVW_LIBS ON)
-add_subdirectory(external/uvw)
+set(BUILD_UVW_LIBS ${WITH_STATIC})
+set(USE_LIBCPP OFF)
+
+add_library(uv_interface INTERFACE)
+set(BUILD_STATIC_LIBS ${WITH_STATIC})
+set(BUILD_SHARED_LIBS NOT ${WITH_STATIC})
+add_subdirectory(external/uvw EXCLUDE_FROM_ALL)
+if(WITH_STATIC)
+  target_link_libraries(uv_interface INTERFACE uvw::uvw-static)
+else()
+  pkg_check_modules(PC_UV libuv REQUIRED)
+  target_link_libraries(uv_interface INTERFACE ${PC_UV_LIBRARIES} uvw)
+  target_include_directories(uv_interface PUBLIC ${PC_UV_INCLUDE_DIR})
+endif()
+
 
 add_executable(${PROJECT_NAME} whois.cpp)
-target_link_libraries(${PROJECT_NAME} PUBLIC ${PC_OXENMQ_LIBRARIES} uvw::uvw-static ${PC_SODIUM_LIBRARIES})
+target_link_libraries(${PROJECT_NAME} PUBLIC ${PC_OXENMQ_LIBRARIES} ${PC_SODIUM_LIBRARIES} uv_interface)
