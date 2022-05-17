@@ -207,7 +207,12 @@ class WhoisServer : public std::enable_shared_from_this<WhoisServer> {
                     break;
                   }
                 } else if (permit_key(key)) {
-                  writeBuf << key << ": " << value << std::endl;
+                  writeBuf << key << ": ";
+                  if (value.is_string())
+                    writeBuf << value.get<std::string_view>();
+                  else
+                    writeBuf << value;
+                  writeBuf << std::endl;
                 } else if (key == "encrypted_value") {
                   encrypted = value.get<std::string>();
                 }
