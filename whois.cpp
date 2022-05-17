@@ -32,7 +32,7 @@ struct MQ {
   }
 };
 
-std::optional<std::array<uint8_t, 32>> decrypt_value(std::string encrypted,
+std::optional<std::vector<uint8_t>> decrypt_value(std::string encrypted,
                                                      std::string nouncehex,
                                                      std::string name,
                                                      LNSType type) {
@@ -42,7 +42,12 @@ std::optional<std::array<uint8_t, 32>> decrypt_value(std::string encrypted,
 
   const auto payloadsize =
       ciphertext.size() - crypto_aead_xchacha20poly1305_ietf_ABYTES;
-  if (payloadsize != 32)
+
+  size_t expected_size = type == LNSType::eTypeLokinet ? 32 :
+      type == LNSType::eTypeSession ? 33 :
+      0 /* who knows */;
+
+  if (not expected_size or payloadsize != expected_size)
     return {};
 
   std::array<uint8_t, 32> derivedKey{};
@@ -53,7 +58,7 @@ std::optional<std::array<uint8_t, 32>> decrypt_value(std::string encrypted,
   crypto_generichash(derivedKey.data(), derivedKey.size(),
                      reinterpret_cast<const unsigned char *>(name.data()),
                      name.size(), namehash.data(), namehash.size());
-  std::array<uint8_t, 32> result{};
+  std::vector<uint8_t> result(payloadsize);
   if (crypto_aead_xchacha20poly1305_ietf_decrypt(
           result.data(), nullptr, nullptr,
           reinterpret_cast<const unsigned char *>(ciphertext.data()),
@@ -107,9 +112,9 @@ class WhoisServer : public std::enable_shared_from_this<WhoisServer> {
         req.dump());
   }
 
-  std::optional<std::array<uint8_t, 32>>
+  std::optional<std::vector<uint8_t>>
   GetAddress(std::string namehash, std::string name, LNSType type) {
-    std::promise<std::optional<std::array<uint8_t, 32>>> promise;
+    std::promise<std::optional<std::vector<uint8_t>>> promise;
     AsyncGetAddress(namehash, name, type,
                     [&promise](auto result) { promise.set_value(result); });
     auto ftr = promise.get_future();
@@ -214,7 +219,7 @@ class WhoisServer : public std::enable_shared_from_this<WhoisServer> {
 
                 switch (type) {
                 case eTypeSession:
-                  writeBuf << "session-id: 05"
+                  writeBuf << "session-id: "
                            << oxenmq::to_hex(maybe->begin(), maybe->end())
                            << std::endl;
                   break;
