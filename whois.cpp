@@ -172,7 +172,9 @@ class WhoisServer : public std::enable_shared_from_this<WhoisServer> {
             const auto j = nlohmann::json::parse(data[1]);
 
             if (j.find("entries") == j.end()) {
-              writeBuf << "; no results for " << name;
+              writeBuf << "; no results for " << name << " with namehash: "
+                       << oxenmq::to_base64(namehash.begin(), namehash.end());
+
               SendReply();
               return;
             }
