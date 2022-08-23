@@ -301,7 +301,7 @@ public:
 
 int printhelp(std::string exe) {
   std::cout << "usage: " << exe
-            << " -[h|v] [-r rpcurl | -P bindport | -H bindhost]" << std::endl;
+            << " -[h|v] [-r rpcurl | -p bindport | -b bindhost]" << std::endl;
   return 0;
 }
 
@@ -312,7 +312,7 @@ int main(int argc, char *argv[]) {
   std::string bindport = "whois";
   std::string bindhost = "0.0.0.0";
   int opt;
-  while ((opt = ::getopt(argc, argv, "hvr:P:H:")) != -1) {
+  while ((opt = ::getopt(argc, argv, "hvr:p:b:")) != -1) {
     switch (opt) {
     case 'h':
       return printhelp(argv[0]);
@@ -325,7 +325,7 @@ int main(int argc, char *argv[]) {
     case 'p':
       bindport = optarg;
       break;
-    case 'H':
+    case 'b':
       bindhost = optarg;
       break;
     }
