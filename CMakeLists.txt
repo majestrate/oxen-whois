@@ -12,7 +12,7 @@ endif()
 
 set(PROJECT_NAME oxen-whois)
 project(${PROJECT_NAME}
-    VERSION 0.0.1
+    VERSION 0.1.0
     DESCRIPTION "oxen-whois - whois server for oxen blockchain"
     LANGUAGES CXX)
 
