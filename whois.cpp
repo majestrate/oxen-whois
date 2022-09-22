@@ -306,8 +306,7 @@ int printhelp(std::string exe) {
 }
 
 int main(int argc, char *argv[]) {
-
-  oxenmq::address rpc{"ipc:///var/lib/oxen/oxend.sock"};
+  oxenmq::address rpc{"tcp://public-na.optf.ngo:22027", oxenc::from_hex("02ae9aa1bdface3ce32488874d16671b04d44f611d1076033c92f3379f221161")};
   bool verbose = false;
   std::string bindport = "whois";
   std::string bindhost = "0.0.0.0";
