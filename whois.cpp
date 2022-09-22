@@ -163,7 +163,8 @@ class WhoisServer : public std::enable_shared_from_this<WhoisServer> {
             conn->close();
           };
           if ((not success) or data.size() < 2) {
-            writeBuf << "; cannot find info on " << name;
+            writeBuf << "; cannot find info on " << name << " with namehash: "
+                       << oxenmq::to_base64(namehash.begin(), namehash.end());
             SendReply();
             return;
           }
