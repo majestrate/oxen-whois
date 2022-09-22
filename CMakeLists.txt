@@ -47,5 +47,5 @@ else()
 endif()
 
 
-add_executable(${PROJECT_NAME} whois.cpp)
+add_executable(${PROJECT_NAME} server.cpp)
 target_link_libraries(${PROJECT_NAME} PUBLIC ${PC_OXENMQ_LIBRARIES} ${PC_SODIUM_LIBRARIES} uv_interface)
